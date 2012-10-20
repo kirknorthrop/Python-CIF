@@ -1,3 +1,5 @@
+#!/usr/bin/python
+
 # Copyright (c) 2012 Kirk Northrop
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy of
@@ -21,6 +23,7 @@ import json
 import MySQLdb
 import config
 from string import capwords
+from datetime import time, date
 
 # Set up your config in config.py.
 
@@ -28,15 +31,41 @@ db=MySQLdb.connect(host=config.db_host,user=config.db_user,passwd=config.db_pass
 c=db.cursor()
 i = 0
 
-#############################
-## ATOC TIPLOC Data Import ##
-#############################
+def convert_time(in_time):
+	if in_time.strip() == '':
+		return None
+	else:
+		hours = int(in_time[0:2])
+		mins = int(in_time[2:4])
+		seconds = 0
+		if len(in_time) == 5:
+			if in_time[4:] == 'H':
+				seconds = 30
+		return time(hours, mins, seconds)
 
-# Before we do the main insert, we want to use the ATOC db to get TIPLOC data.
+def convert_date(in_date):
+	if in_date.strip() == '':
+		return None
+	else:
+		year = int(in_date[0:2])
+		month = int(in_date[2:4])
+		day = int(in_date[4:6])
+		if year > 59:
+			year += 1900
+		else:
+			year += 2000
+		return date(year, month, day)
+
+######################
+## ATOC Data Import ##
+######################
+
+# Imports from ATOC data
 if config.import_tiploc or config.import_atoc_schedule:
 	atoc_data = open(config.atoc_file, 'r')
+	current_schedule_id = None
+	location_order = None
 	for line in atoc_data:
-		# If TIPLOC insert
 		if line[0:2] == 'HD': # Header record
 			print line
 		
@@ -48,6 +77,10 @@ if config.import_tiploc or config.import_atoc_schedule:
 							'stanox': line[44:49],
 							'crs_code': line[53:56],
 							'short_description': line[56:72]}
+
+				for value in db_values:
+					if value.strip() == '':
+						value = None
 
 				c.execute('''INSERT INTO tiploc (tiploc, nlc, tps_description, stanox, crs_code, short_description) 
 							VALUES (%(tiploc)s, %(nlc)s, %(tps_description)s, %(stanox)s, %(crs_code)s, %(short_description)s)''',
@@ -66,16 +99,46 @@ if config.import_tiploc or config.import_atoc_schedule:
 				print line
 		
 		elif line[0:2] == 'AA': # Associations
-			# TODO: Implement
 			if config.import_atoc_schedule:
-				pass
-				#print line
+				db_values = {'transaction_type'	: line[2:3],
+							'main_train_uid'	: line[3:9],
+							'assoc_train_uid'	: line[9:15],
+							'start_date'		: convert_date(line[15:21]),
+							'end_date'			: convert_date(line[21:27]),
+							'days_run'			: line[27:34],
+							'category'			: line[34:36],
+							'date_indicator'	: line[36:37],
+							'location'			: line[37:44],
+							'base_location_suffix'	: line[44:45],
+							'assoc_location_suffix'	: line[45:46],
+							'type'				: line[46:47],
+							'stp_indicator'		: line[79:80]}
+
+				dayno = 0
+				for day in list(db_values['days_run']):
+					db_values['day' + str(dayno)] = day
+					dayno += 1
+
+				for value in db_values:
+					if value.strip() == '':
+						value = None
+
+				if db_values['transaction_type'] == 'D' or db_values['stp_indicator'] == 'C':
+					c.execute("DELETE FROM association WHERE main_train_uid = %(main_train_uid)s AND assoc_train_uid = %(assoc_train_uid)s AND start_date = %(start_date)s AND end_date = %(end_date)s AND runs_mo = %(day0)s AND runs_tu = %(day1)s AND runs_we = %(day2)s AND runs_th = %(day3)s AND runs_fr = %(day4)s AND runs_sa = %(day5)s AND runs_su = %(day6)s AND location = %(location)s AND base_location_suffix = %(base_location_suffix)s AND assoc_location_suffix = %(assoc_location_suffix)s", db_values)
+				elif db_values['transaction_type'] == 'R':
+					raise NotImplementedError
+				else:
+					c.execute('''INSERT INTO association (main_train_uid, assoc_train_uid, start_date, end_date, runs_mo, runs_tu, runs_we, runs_th, runs_fr, runs_sa, runs_su, category, date_indicator, location, base_location_suffix, assoc_location_suffix, type, stp_indicator) 
+							VALUES (%(main_train_uid)s, %(assoc_train_uid)s, %(start_date)s, %(end_date)s, %(day0)s, %(day1)s, %(day2)s, %(day3)s, %(day4)s, %(day5)s, %(day6)s, %(category)s, %(date_indicator)s, %(location)s, %(base_location_suffix)s, %(assoc_location_suffix)s, %(type)s, %(stp_indicator)s)''',
+							db_values)
+
 		
 		elif line[0:2] == 'BS': # Basic Schedule
 			if config.import_atoc_schedule:
-				db_values = {'train_uid'	: line[3:9],
-							'start_date'	: line[9:15],
-							'end_date'		: line[15:21],
+				db_values = {'transaction_type' : line[2:3],
+							'train_uid'		: line[3:9],
+							'start_date'	: convert_date(line[9:15]),
+							'end_date'		: convert_date(line[15:21]),
 							'days_run'		: line[21:28],
 							'bank_holiday_running'	: line[28:29],
 							'train_status'	: line[29:30],
@@ -100,9 +163,33 @@ if config.import_tiploc or config.import_atoc_schedule:
 					db_values['day' + str(dayno)] = day
 					dayno += 1
 
-				c.execute('''INSERT INTO schedule (train_uid, start_date, end_date, runs_mo, runs_tu, runs_we, runs_th, runs_fr, runs_sa, runs_su, bank_holiday_running, train_status, train_category, train_identity, headcode, train_service_code, portion_id, power_type, timing_load, speed, operating_characteristics, train_class, sleepers, reservations, catering_code, service_branding, stp_indicator) 
+				for value in db_values:
+					if value.strip() == '':
+						value = None
+
+				if db_values['transaction_type'] == 'D' or db_values['stp_indicator'] == 'C':
+					c.execute("SELECT id FROM schedule WHERE train_uid = %(train_uid)s AND start_date = %(start_date)s AND end_date = %(end_date)s AND runs_mo = %(day0)s AND runs_tu = %(day1)s AND runs_we = %(day2)s AND runs_th = %(day3)s AND runs_fr = %(day4)s AND runs_sa = %(day5)s AND runs_su = %(day6)s", db_values)
+
+					id = c.fetchone()
+					if id != None:
+						id = id[0]
+						print "Deleted schedule ", str(id)
+						# This is a deletion
+						c.execute("DELETE FROM schedule WHERE runs_mo = %(day0)s AND runs_tu = %(day1)s AND runs_we = %(day2)s AND runs_th = %(day3)s AND runs_fr = %(day4)s AND runs_sa = %(day5)s AND runs_su = %(day6)s AND train_uid = %(train_uid)s AND start_date = %(start_date)s AND end_date = %(end_date)s", db_values)
+						c.execute("DELETE FROM locations WHERE id = %s", id)
+				
+				elif db_values['transaction_type'] == 'R':
+					raise NotImplementedError
+				
+				else:
+					c.execute('''INSERT INTO schedule (train_uid, start_date, end_date, runs_mo, runs_tu, runs_we, runs_th, runs_fr, runs_sa, runs_su, bank_holiday_running, train_status, train_category, train_identity, headcode, train_service_code, portion_id, power_type, timing_load, speed, operating_characteristics, train_class, sleepers, reservations, catering_code, service_branding, stp_indicator) 
 							VALUES (%(train_uid)s, %(start_date)s, %(end_date)s, %(day0)s, %(day1)s, %(day2)s, %(day3)s, %(day4)s, %(day5)s, %(day6)s, %(bank_holiday_running)s, %(train_status)s, %(train_category)s, %(train_identity)s, %(headcode)s, %(train_service_code)s, %(portion_id)s, %(power_type)s, %(timing_load)s, %(speed)s, %(operating_characteristics)s, %(train_class)s, %(sleepers)s, %(reservations)s, %(catering_code)s, %(service_branding)s, %(stp_indicator)s)''',
 							db_values)
+
+					c.execute('SELECT id FROM schedule ORDER BY id DESC LIMIT 0, 1')
+					current_schedule_id = c.fetchone()[0]
+					location_order = 1
+				
 		
 		elif line[0:2] == 'BX': # Basic Schedule Extra Details
 			# None of this data is of any particular interest to us.
@@ -118,10 +205,13 @@ if config.import_tiploc or config.import_atoc_schedule:
 		
 		elif line[0:2] == 'LO': # Location Origin
 			if config.import_atoc_schedule:
-				db_values = {'tiploc_code'		: line[2:9],
+				db_values = {'id'				: current_schedule_id,
+							'order'				: location_order,
+							'type'				: line[0:2],
+							'tiploc_code'		: line[2:9],
 							'tiploc_instance'	: line[9:10],
-							'departure'			: line[10:15],
-							'public_departure'	: line[15:19],
+							'departure'			: convert_time(line[10:15]),
+							'public_departure'	: convert_time(line[15:19]),
 							'platform'			: line[19:22],
 							'line'				: line[22:25],
 							'engineering_allowance'	: line[25:27],
@@ -129,19 +219,28 @@ if config.import_tiploc or config.import_atoc_schedule:
 							'activity'			: line[29:41],
 							'performance_allowance'	: line[41:43]}
 
-				c.execute('''INSERT INTO locations (tiploc_code, tiploc_instance, departure, public_departure, platform, line, engineering_allowance, pathing_allowance, activity, performance_allowance) 
-							VALUES (%(tiploc_code)s, %(tiploc_instance)s, %(departure)s, %(public_departure)s, %(platform)s, %(line)s, %(engineering_allowance)s, %(pathing_allowance)s, %(activity)s, %(performance_allowance)s)''',
+				for value in db_values:
+					if value.strip() == '':
+						value = None
+
+				c.execute('''INSERT INTO location (`id`, `type`, `order`, tiploc_code, tiploc_instance, departure, public_departure, platform, line, engineering_allowance, pathing_allowance, activity, performance_allowance) 
+							VALUES (%(id)s, %(type)s, %(order)s, %(tiploc_code)s, %(tiploc_instance)s, %(departure)s, %(public_departure)s, %(platform)s, %(line)s, %(engineering_allowance)s, %(pathing_allowance)s, %(activity)s, %(performance_allowance)s)''',
 							db_values)
+
+				location_order += 1
 		
 		elif line[0:2] == 'LI': # Location Intermediate
 			if config.import_atoc_schedule:
-				db_values = {'tiploc_code'		: line[2:9],
+				db_values = {'id'				: current_schedule_id,
+							'order'				: location_order,
+							'type'				: line[0:2],
+							'tiploc_code'		: line[2:9],
 							'tiploc_instance'	: line[9:10],
-							'arrival'			: line[10:15],
-							'departure'			: line[15:20],
-							'pass'				: line[20:25],
-							'public_arrival'	: line[25:29],
-							'public_departure'	: line[29:33],
+							'arrival'			: convert_time(line[10:15]),
+							'departure'			: convert_time(line[15:20]),
+							'pass'				: convert_time(line[20:25]),
+							'public_arrival'	: convert_time(line[25:29]),
+							'public_departure'	: convert_time(line[29:33]),
 							'platform'			: line[33:36],
 							'line'				: line[36:39],
 							'path'				: line[39:42],
@@ -150,23 +249,42 @@ if config.import_tiploc or config.import_atoc_schedule:
 							'pathing_allowance'	: line[56:58],
 							'performance_allowance'	: line[58:60]}
 
-				c.execute('''INSERT INTO locations (tiploc_code, tiploc_instance, arrival, departure, pass, public_arrival, public_departure, platform, line, path, activity, engineering_allowance, pathing_allowance, performance_allowance) 
-							VALUES (%(tiploc_code)s, %(tiploc_instance)s, %(arrival)s, %(departure)s, %(pass)s, %(public_arrival)s, %(public_departure)s, %(platform)s, %(line)s, %(path)s, %(activity)s, %(engineering_allowance)s, %(pathing_allowance)s, %(performance_allowance)s)''',
+				if db_values['pass'] != time(0,0,0) and (db_values['public_arrival'] == time(0,0,0) or db_values['public_departure'] == time(0,0,0)):
+					db_values['public_departure'] = None
+					db_values['public_arrival'] = None
+
+				for value in db_values:
+					if value.strip() == '':
+						value = None
+
+				c.execute('''INSERT INTO location (`id`, `type`, `order`, tiploc_code, tiploc_instance, arrival, departure, pass, public_arrival, public_departure, platform, line, path, activity, engineering_allowance, pathing_allowance, performance_allowance) 
+							VALUES (%(id)s, %(type)s, %(order)s, %(tiploc_code)s, %(tiploc_instance)s, %(arrival)s, %(departure)s, %(pass)s, %(public_arrival)s, %(public_departure)s, %(platform)s, %(line)s, %(path)s, %(activity)s, %(engineering_allowance)s, %(pathing_allowance)s, %(performance_allowance)s)''',
 							db_values)
 		
+				location_order += 1
+
 		elif line[0:2] == 'LT': # Location Terminus
 			if config.import_atoc_schedule:
-				db_values = {'tiploc_code'		: line[2:9],
+				db_values = {'id'				: current_schedule_id,
+							'order'				: location_order,
+							'type'				: line[0:2],
+							'tiploc_code'		: line[2:9],
 							'tiploc_instance'	: line[9:10],
-							'arrival'			: line[10:15],
-							'public_arrival'	: line[15:19],
+							'arrival'			: convert_time(line[10:15]),
+							'public_arrival'	: convert_time(line[15:19]),
 							'platform'			: line[19:22],
 							'path'				: line[22:25],
 							'activity'			: line[25:37]}
 
-				c.execute('''INSERT INTO locations (tiploc_code, tiploc_instance, arrival, public_arrival, platform, path, activity) 
-							VALUES (%(tiploc_code)s, %(tiploc_instance)s, %(arrival)s, %(public_arrival)s, %(platform)s, %(path)s, %(activity)s)''',
+				for value in db_values:
+					if value.strip() == '':
+						value = None
+
+				c.execute('''INSERT INTO location (`id`, `type`, `order`, tiploc_code, tiploc_instance, arrival, public_arrival, platform, path, activity) 
+							VALUES (%(id)s, %(type)s, %(order)s, %(tiploc_code)s, %(tiploc_instance)s, %(arrival)s, %(public_arrival)s, %(platform)s, %(path)s, %(activity)s)''',
 							db_values)
+
+				location_order += 1
 		
 		elif line[0:2] == 'CR': # Change en route
 			# TODO: Implement
